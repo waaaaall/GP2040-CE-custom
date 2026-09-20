@@ -1615,8 +1615,11 @@ class Message(ProtoElement):
         optional_only.ClearField(str('enum_type'))
         optional_only.name += str(id(self))
 
-        desc = google.protobuf.descriptor.MakeDescriptor(optional_only)
-        msg = reflection.MakeClass(desc)()
+        try:
+            msg = reflection.MakeClass(desc)()
+        except AttributeError:
+            from google.protobuf.message_factory import GetMessageClass
+            msg = GetMessageClass(desc)()
 
         for field in optional_only.field:
             if field.type == FieldD.TYPE_STRING:
