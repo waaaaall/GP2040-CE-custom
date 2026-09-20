@@ -1615,6 +1615,7 @@ class Message(ProtoElement):
         optional_only.ClearField(str('enum_type'))
         optional_only.name += str(id(self))
 
+        desc = google.protobuf.descriptor.MakeDescriptor(optional_only)
         try:
             msg = reflection.MakeClass(desc)()
         except AttributeError:
