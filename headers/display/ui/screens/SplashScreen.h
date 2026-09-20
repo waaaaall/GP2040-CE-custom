@@ -15,6 +15,7 @@ class SplashScreen : public GPScreen {
         virtual void drawScreen();
         uint16_t prevButtonState = 0;
         uint32_t splashStartTime = 0;
+        uint16_t currentFrame = 0;
         bool configMode;
 };
 
