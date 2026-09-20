@@ -2,9 +2,7 @@
 
 #include "pico/stdlib.h"
 
-#if __has_include("splash_anim.h")
 #include "splash_anim.h"
-#endif
 
 void SplashScreen::init() {
     getRenderer()->clearScreen();
@@ -18,11 +16,6 @@ void SplashScreen::shutdown() {
 }
 
 void SplashScreen::drawScreen() {
-    if (getDisplayOptions().splashMode == static_cast<SplashMode>(SPLASH_MODE_NONE)) {
-        getRenderer()->drawText(0, 4, " Splash NOT enabled.");
-        return;
-    }
-
 #if defined(SPLASH_ANIM_ENABLED) && (SPLASH_ANIM_ENABLED == 1)
     // Animated splash screen
     uint32_t elapsed = getMillis() - splashStartTime;
@@ -65,22 +58,33 @@ void SplashScreen::drawScreen() {
 }
 
 int8_t SplashScreen::update() {
+#if defined(SPLASH_ANIM_ENABLED) && (SPLASH_ANIM_ENABLED == 1)
+    if (!configMode) {
+        // Keep looping animated splash screen indefinitely (do not transition to BUTTONS)
+        return -1;
+    } else {
+        uint16_t buttonState = getGamepad()->state.buttons;
+        if (prevButtonState && !buttonState) {
+            if (prevButtonState == GAMEPAD_MASK_B2) {
+                prevButtonState = 0;
+                return DisplayMode::CONFIG_INSTRUCTION;
+            }
+        }
+        prevButtonState = buttonState;
+    }
+    return -1;
+#else
     // If splash mode is disabled in WebConfig, go directly to BUTTONS screen
     if (getDisplayOptions().splashMode == static_cast<SplashMode>(SPLASH_MODE_NONE)) {
         return DisplayMode::BUTTONS;
     }
 
     if (!configMode) {
-#if defined(SPLASH_ANIM_ENABLED) && (SPLASH_ANIM_ENABLED == 1)
-        // Keep looping animated splash screen indefinitely (do not transition to BUTTONS)
-        return -1;
-#else
         uint32_t elapsedDuration = getMillis() - splashStartTime;
         uint32_t splashDuration = getDisplayOptions().splashDuration;
         if (splashDuration != 0 && (elapsedDuration >= splashDuration)) {
             return DisplayMode::BUTTONS;
         }
-#endif
     } else {
         uint16_t buttonState = getGamepad()->state.buttons;
         if (prevButtonState && !buttonState) {
@@ -92,5 +96,6 @@ int8_t SplashScreen::update() {
         prevButtonState = buttonState;
     }
     return -1; // -1 means no change in screen state
+#endif
 }
 
