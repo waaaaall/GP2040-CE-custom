@@ -12,7 +12,7 @@ function (compile_proto)
 	add_custom_command(
 		DEPENDS ${CMAKE_SOURCE_DIR}/lib/nanopb/extra/requirements.txt
 		COMMAND ${Python3_EXECUTABLE} -m venv ${VENV}
-		COMMAND ${VENV_BIN_DIR}/pip --disable-pip-version-check install -r ${CMAKE_SOURCE_DIR}/lib/nanopb/extra/requirements.txt
+		COMMAND ${VENV_BIN_DIR}/pip --disable-pip-version-check install --default-timeout=120 --retries 5 -r ${CMAKE_SOURCE_DIR}/lib/nanopb/extra/requirements.txt
 		COMMAND ${VENV_BIN_DIR}/pip freeze > ${VENV_FILE}
 		OUTPUT ${VENV_FILE}
 		COMMENT "Setting up Python Virtual Environment"
