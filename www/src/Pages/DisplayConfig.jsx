@@ -1,10 +1,11 @@
 import React, { useContext, useEffect, useState, useRef } from 'react';
-import { Button, Form, Row, Col, FormLabel } from 'react-bootstrap';
+import { Button, Form, Row, Col, FormLabel, ProgressBar, Alert, Badge } from 'react-bootstrap';
 import { Formik, useFormikContext, Field } from 'formik';
 import chunk from 'lodash/chunk';
 import * as yup from 'yup';
 import { Trans, useTranslation } from 'react-i18next';
 import { NavLink } from 'react-router-dom';
+import { GifReader } from 'omggif';
 
 import { AppContext } from '../Contexts/AppContext';
 import FormControl from '../Components/FormControl';
@@ -260,7 +261,8 @@ export default function DisplayConfigPage() {
 				return (
 					console.log('errors', errors) ||
 					console.log('values', values) || (
-						<Section title={t('DisplayConfig:header-text')}>
+						<>
+							<Section title={t('DisplayConfig:header-text')}>
 							{getAvailablePeripherals('i2c') ? (
 								<div>
 									<p>{t('DisplayConfig:sub-header-text')}</p>
@@ -718,6 +720,10 @@ export default function DisplayConfigPage() {
 								</FormLabel>
 							)}
 						</Section>
+						{getAvailablePeripherals('i2c') ? (
+							<AnimatedSplashSection />
+						) : null}
+						</>
 					)
 				);
 			}}
@@ -863,5 +869,609 @@ const Canvas = ({ value: bitsArray, onChange }) => {
 				{/* <ErrorMessage name="splashImage" /> */}
 			</div>
 		</div>
+	);
+};
+
+const processGifFile = async (file, threshold = 128, invert = false) => {
+	const arrayBuffer = await file.arrayBuffer();
+	const uint8Arr = new Uint8Array(arrayBuffer);
+	const reader = new GifReader(uint8Arr);
+	const numFrames = reader.numFrames();
+	if (numFrames === 0) {
+		throw new Error('No frames found in GIF');
+	}
+
+	const srcW = reader.width;
+	const srcH = reader.height;
+	const targetW = 128;
+	const targetH = 64;
+
+	const tempCanvas = document.createElement('canvas');
+	tempCanvas.width = srcW;
+	tempCanvas.height = srcH;
+	const tempCtx = tempCanvas.getContext('2d');
+
+	const outCanvas = document.createElement('canvas');
+	outCanvas.width = targetW;
+	outCanvas.height = targetH;
+	const outCtx = outCanvas.getContext('2d');
+	outCtx.imageSmoothingEnabled = false;
+
+	const scale = Math.min(targetW / srcW, targetH / srcH);
+	const newW = Math.max(1, Math.round(srcW * scale));
+	const newH = Math.max(1, Math.round(srcH * scale));
+	const offX = Math.floor((targetW - newW) / 2);
+	const offY = Math.floor((targetH - newH) / 2);
+
+	const frames1bpp = [];
+	const previewDataUrls = [];
+	const delays = [];
+	const cumulative = [];
+	let totalDuration = 0;
+
+	const rgba = new Uint8ClampedArray(srcW * srcH * 4);
+
+	for (let f = 0; f < numFrames; f++) {
+		const info = reader.frameInfo(f);
+		let delay = (info.delay || 10) * 10;
+		if (delay < 20) delay = 20;
+		delays.push(delay);
+		totalDuration += delay;
+		cumulative.push(totalDuration);
+
+		reader.decodeAndBlitFrameRGBA(f, rgba);
+
+		const imgData = new ImageData(rgba, srcW, srcH);
+		tempCtx.putImageData(imgData, 0, 0);
+
+		outCtx.fillStyle = '#000000';
+		outCtx.fillRect(0, 0, targetW, targetH);
+		outCtx.drawImage(tempCanvas, 0, 0, srcW, srcH, offX, offY, newW, newH);
+
+		const outPixels = outCtx.getImageData(0, 0, targetW, targetH);
+		const frameBytes = new Uint8Array(1024);
+
+		for (let y = 0; y < targetH; y++) {
+			for (let x = 0; x < targetW; x++) {
+				const idx = (y * targetW + x) * 4;
+				const r = outPixels.data[idx];
+				const g = outPixels.data[idx + 1];
+				const b = outPixels.data[idx + 2];
+				const a = outPixels.data[idx + 3];
+				const lum = a < 128 ? 0 : (r + g + b) / 3;
+				let isWhite = lum >= threshold ? 1 : 0;
+				if (invert) isWhite = 1 - isWhite;
+
+				if (isWhite) {
+					const byteIdx = y * 16 + Math.floor(x / 8);
+					const bitIdx = 7 - (x % 8);
+					frameBytes[byteIdx] |= 1 << bitIdx;
+				}
+			}
+		}
+		frames1bpp.push(frameBytes);
+		previewDataUrls.push(outCanvas.toDataURL());
+	}
+
+	// Pack header: 20 bytes Little Endian
+	const headerBuf = new ArrayBuffer(20);
+	const headerView = new DataView(headerBuf);
+	headerView.setUint32(0, 0x53504c53, true); // magic: "SPLS"
+	headerView.setUint16(4, 1, true); // version: 1
+	headerView.setUint16(6, numFrames, true); // frame_count
+	headerView.setUint32(8, totalDuration, true); // total_duration
+	headerView.setUint16(12, 128, true); // width
+	headerView.setUint16(14, 64, true); // height
+	headerView.setUint16(16, 1024, true); // frame_size
+	headerView.setUint16(18, 0, true); // reserved
+
+	// Pack cumulative times: uint32[numFrames] Little Endian
+	const cumBuf = new ArrayBuffer(numFrames * 4);
+	const cumView = new DataView(cumBuf);
+	for (let i = 0; i < numFrames; i++) {
+		cumView.setUint32(i * 4, cumulative[i], true);
+	}
+
+	// Combine into single Uint8Array
+	const totalSize = 20 + numFrames * 4 + numFrames * 1024;
+	const payload = new Uint8Array(totalSize);
+	payload.set(new Uint8Array(headerBuf), 0);
+	payload.set(new Uint8Array(cumBuf), 20);
+	let offset = 20 + numFrames * 4;
+	for (let i = 0; i < numFrames; i++) {
+		payload.set(frames1bpp[i], offset);
+		offset += 1024;
+	}
+
+	return {
+		numFrames,
+		totalDuration,
+		delays,
+		previewDataUrls,
+		payload,
+		srcW,
+		srcH,
+	};
+};
+
+const uploadAnimation = async (payload, onProgress) => {
+	const CHUNK_SIZE = 2048;
+	const totalSize = payload.length;
+	const numChunks = Math.ceil(totalSize / CHUNK_SIZE);
+
+	for (let i = 0; i < numChunks; i++) {
+		const offset = i * CHUNK_SIZE;
+		const chunkSlice = payload.subarray(
+			offset,
+			Math.min(offset + CHUNK_SIZE, totalSize),
+		);
+
+		let binary = '';
+		for (let b = 0; b < chunkSlice.length; b++) {
+			binary += String.fromCharCode(chunkSlice[b]);
+		}
+		const base64Data = btoa(binary);
+
+		const res = await WebApi.uploadSplashAnimChunk({
+			offset,
+			totalSize,
+			data: base64Data,
+		});
+
+		if (!res || !res.success) {
+			throw new Error(res?.error || `Upload failed at chunk ${i + 1}`);
+		}
+
+		if (onProgress) {
+			onProgress(Math.round(((i + 1) / numChunks) * 100), i + 1, numChunks);
+		}
+	}
+};
+
+const AnimatedSplashSection = () => {
+	const { t } = useTranslation('');
+	const [statusInfo, setStatusInfo] = useState(null);
+	const [loadingInfo, setLoadingInfo] = useState(true);
+	const [selectedFile, setSelectedFile] = useState(null);
+	const [animData, setAnimData] = useState(null);
+	const [previewIndex, setPreviewIndex] = useState(0);
+	const [isPlaying, setIsPlaying] = useState(true);
+	const [threshold, setThreshold] = useState(128);
+	const [inverted, setInverted] = useState(false);
+	const [processing, setProcessing] = useState(false);
+	const [uploading, setUploading] = useState(false);
+	const [uploadProgress, setUploadProgress] = useState(0);
+	const [uploadStatusText, setUploadStatusText] = useState('');
+	const [alertMsg, setAlertMsg] = useState(null);
+	const [alertVariant, setAlertVariant] = useState('info');
+
+	const animTimerRef = useRef(null);
+	const fileInputRef = useRef(null);
+
+	const fetchStatus = async () => {
+		setLoadingInfo(true);
+		try {
+			const info = await WebApi.getSplashAnimationInfo();
+			setStatusInfo(info);
+		} catch (err) {
+			console.error(err);
+		} finally {
+			setLoadingInfo(false);
+		}
+	};
+
+	useEffect(() => {
+		fetchStatus();
+	}, []);
+
+	useEffect(() => {
+		if (!animData || !isPlaying || animData.numFrames <= 1) return;
+
+		const delay = animData.delays[previewIndex] || 100;
+		animTimerRef.current = setTimeout(() => {
+			setPreviewIndex((prev) => (prev + 1) % animData.numFrames);
+		}, delay);
+
+		return () => {
+			if (animTimerRef.current) clearTimeout(animTimerRef.current);
+		};
+	}, [animData, previewIndex, isPlaying]);
+
+	const parseAndProcess = async (file, thresh, inv) => {
+		setProcessing(true);
+		try {
+			const res = await processGifFile(file, thresh, inv);
+			setAnimData(res);
+			setPreviewIndex(0);
+		} catch (err) {
+			setAlertVariant('danger');
+			setAlertMsg(
+				t(
+					'DisplayConfig:animated-splash-parse-fail',
+					'Failed to parse GIF: {{error}}',
+					{ error: err.message },
+				),
+			);
+			setAnimData(null);
+		} finally {
+			setProcessing(false);
+		}
+	};
+
+	const onFileChange = (e) => {
+		const file = e.target.files?.[0];
+		if (!file) return;
+		setSelectedFile(file);
+		setAlertMsg(null);
+		parseAndProcess(file, threshold, inverted);
+	};
+
+	const onThresholdChange = (e) => {
+		const val = parseInt(e.target.value, 10);
+		setThreshold(val);
+		if (selectedFile) {
+			parseAndProcess(selectedFile, val, inverted);
+		}
+	};
+
+	const onInvertedChange = (e) => {
+		const val = e.target.checked;
+		setInverted(val);
+		if (selectedFile) {
+			parseAndProcess(selectedFile, threshold, val);
+		}
+	};
+
+	const handleUpload = async () => {
+		if (!animData || !animData.payload) return;
+		setUploading(true);
+		setUploadProgress(0);
+		setUploadStatusText(
+			t(
+				'DisplayConfig:animated-splash-starting',
+				'Starting flash erase & upload...',
+			),
+		);
+		setAlertMsg(null);
+
+		try {
+			await uploadAnimation(animData.payload, (percent, curr, total) => {
+				setUploadProgress(percent);
+				setUploadStatusText(
+					t(
+						'DisplayConfig:animated-splash-writing-chunk',
+						'Writing chunk {{curr}} / {{total}} ({{percent}}%)...',
+						{ curr, total, percent },
+					),
+				);
+			});
+			setAlertVariant('success');
+			setAlertMsg(
+				t(
+					'DisplayConfig:animated-splash-success',
+					'Animated splash screen successfully flashed to RP2040 Flash memory! It will play automatically when the controller starts up.',
+				),
+			);
+			await fetchStatus();
+		} catch (err) {
+			setAlertVariant('danger');
+			setAlertMsg(
+				t(
+					'DisplayConfig:animated-splash-upload-fail',
+					'Upload failed: {{error}}',
+					{ error: err.message },
+				),
+			);
+		} finally {
+			setUploading(false);
+			setUploadStatusText('');
+		}
+	};
+
+	const handleClear = async () => {
+		if (
+			!window.confirm(
+				t(
+					'DisplayConfig:animated-splash-confirm-clear',
+					'Are you sure you want to remove the custom animated splash screen and restore the default splash?',
+				),
+			)
+		) {
+			return;
+		}
+		setUploading(true);
+		setAlertMsg(null);
+		try {
+			await WebApi.clearSplashAnimation();
+			setAlertVariant('success');
+			setAlertMsg(
+				t(
+					'DisplayConfig:animated-splash-cleared',
+					'Flash animation cleared. Default static splash screen restored.',
+				),
+			);
+			await fetchStatus();
+		} catch (err) {
+			setAlertVariant('danger');
+			setAlertMsg(
+				t(
+					'DisplayConfig:animated-splash-clear-fail',
+					'Clear failed: {{error}}',
+					{ error: err.message },
+				),
+			);
+		} finally {
+			setUploading(false);
+		}
+	};
+
+	return (
+		<Section
+			title={t(
+				'DisplayConfig:animated-splash-header',
+				'Animated Splash Screen (GIF Direct Upload)',
+			)}
+		>
+			<p className="text-muted">
+				{t(
+					'DisplayConfig:animated-splash-desc',
+					'Upload an animated GIF directly into the RP2040 Flash memory without reflashing firmware. Frames will automatically be converted to 128x64 monochrome format.',
+				)}
+			</p>
+
+			<div className="mb-4 p-3 bg-secondary bg-opacity-10 rounded border">
+				<div className="d-flex align-items-center justify-content-between flex-wrap gap-2">
+					<div>
+						<strong>
+							{t(
+								'DisplayConfig:animated-splash-status',
+								'Current Flash Status: ',
+							)}
+						</strong>
+						{loadingInfo ? (
+							<span>
+								{t('DisplayConfig:animated-splash-checking', 'Checking...')}
+							</span>
+						) : statusInfo?.hasAnimation ? (
+							<Badge bg="success" className="ms-2">
+								{t(
+									'DisplayConfig:animated-splash-active',
+									'Active ({{count}} frames, {{duration}}s, {{size}} KB)',
+									{
+										count: statusInfo.frameCount,
+										duration: (statusInfo.totalDuration / 1000).toFixed(2),
+										size: Math.round(
+											(20 +
+												statusInfo.frameCount * 4 +
+												statusInfo.frameCount * 1024) /
+												1024,
+										),
+									},
+								)}
+							</Badge>
+						) : (
+							<Badge bg="secondary" className="ms-2">
+								{t(
+									'DisplayConfig:animated-splash-default-active',
+									'Default Static Splash Active',
+								)}
+							</Badge>
+						)}
+					</div>
+					{statusInfo?.hasAnimation && (
+						<Button
+							variant="outline-danger"
+							size="sm"
+							onClick={handleClear}
+							disabled={uploading}
+						>
+							{t(
+								'DisplayConfig:animated-splash-clear-btn',
+								'Clear Animation from Flash',
+							)}
+						</Button>
+					)}
+				</div>
+			</div>
+
+			{alertMsg && (
+				<Alert
+					variant={alertVariant}
+					onClose={() => setAlertMsg(null)}
+					dismissible
+				>
+					{alertMsg}
+				</Alert>
+			)}
+
+			<Row className="mb-3">
+				<Col sm="6">
+					<Form.Group>
+						<Form.Label>
+							{t(
+								'DisplayConfig:animated-splash-select-gif',
+								'Select Animated GIF:',
+							)}
+						</Form.Label>
+						<Form.Control
+							ref={fileInputRef}
+							type="file"
+							accept="image/gif"
+							onChange={onFileChange}
+							disabled={uploading}
+						/>
+					</Form.Group>
+				</Col>
+			</Row>
+
+			{processing && (
+				<div className="my-3 text-info">
+					{t(
+						'DisplayConfig:animated-splash-converting',
+						'Converting GIF frames to 128x64 monochrome...',
+					)}
+				</div>
+			)}
+
+			{animData && !processing && (
+				<div className="mt-3 p-3 bg-dark bg-opacity-25 rounded border">
+					<h5>
+						{t(
+							'DisplayConfig:animated-splash-preview-title',
+							'Preview & Flash Programming',
+						)}
+					</h5>
+					<Row className="align-items-center mb-3">
+						<Col sm="auto">
+							<div
+								style={{
+									width: 256,
+									height: 128,
+									backgroundColor: '#000',
+									border: '2px solid #666',
+									borderRadius: 4,
+									display: 'flex',
+									alignItems: 'center',
+									justifyContent: 'center',
+									overflow: 'hidden',
+								}}
+							>
+								{animData.previewDataUrls[previewIndex] ? (
+									<img
+										src={animData.previewDataUrls[previewIndex]}
+										alt="Preview"
+										style={{
+											width: 256,
+											height: 128,
+											imageRendering: 'pixelated',
+										}}
+									/>
+								) : null}
+							</div>
+						</Col>
+						<Col sm="6">
+							<div>
+								<strong>
+									{t(
+										'DisplayConfig:animated-splash-source-size',
+										'Source Size: ',
+									)}
+								</strong>
+								{animData.srcW} x {animData.srcH}
+							</div>
+							<div>
+								<strong>
+									{t(
+										'DisplayConfig:animated-splash-target-display',
+										'Target Display: ',
+									)}
+								</strong>
+								128 x 64 (OLED)
+							</div>
+							<div>
+								<strong>
+									{t(
+										'DisplayConfig:animated-splash-total-frames',
+										'Total Frames: ',
+									)}
+								</strong>
+								{animData.numFrames}
+							</div>
+							<div>
+								<strong>
+									{t(
+										'DisplayConfig:animated-splash-total-duration',
+										'Total Duration: ',
+									)}
+								</strong>
+								{(animData.totalDuration / 1000).toFixed(2)} s
+							</div>
+							<div>
+								<strong>
+									{t('DisplayConfig:animated-splash-flash-size', 'Flash Size: ')}
+								</strong>
+								{(animData.payload.length / 1024).toFixed(1)} KB / 512 KB max
+							</div>
+							<div className="mt-2">
+								<Button
+									size="sm"
+									variant="secondary"
+									onClick={() => setIsPlaying((p) => !p)}
+									className="me-2"
+								>
+									{isPlaying
+										? t('DisplayConfig:animated-splash-pause', 'Pause Preview')
+										: t('DisplayConfig:animated-splash-play', 'Play Preview')}
+								</Button>
+								<span className="text-muted">
+									{t('DisplayConfig:animated-splash-frame', 'Frame: ')}
+									{previewIndex + 1} / {animData.numFrames}
+								</span>
+							</div>
+						</Col>
+					</Row>
+
+					<Row className="mb-3">
+						<Col sm="4">
+							<Form.Group>
+								<Form.Label>
+									{t(
+										'DisplayConfig:animated-splash-threshold',
+										'Brightness Threshold: {{thresh}}',
+										{ thresh: threshold },
+									)}
+								</Form.Label>
+								<Form.Range
+									min={0}
+									max={255}
+									value={threshold}
+									onChange={onThresholdChange}
+									disabled={uploading}
+								/>
+							</Form.Group>
+						</Col>
+						<Col sm="4" className="d-flex align-items-center">
+							<Form.Check
+								type="checkbox"
+								id="invertCheck"
+								label={t(
+									'DisplayConfig:animated-splash-invert',
+									'Invert Black/White',
+								)}
+								checked={inverted}
+								onChange={onInvertedChange}
+								disabled={uploading}
+							/>
+						</Col>
+					</Row>
+
+					{uploading && (
+						<div className="mb-3">
+							<div className="mb-1 text-primary">{uploadStatusText}</div>
+							<ProgressBar
+								now={uploadProgress}
+								label={`${uploadProgress}%`}
+								animated
+							/>
+						</div>
+					)}
+
+					<div>
+						<Button
+							variant="primary"
+							onClick={handleUpload}
+							disabled={uploading || animData.payload.length > 512 * 1024}
+						>
+							{uploading
+								? t('DisplayConfig:animated-splash-writing', 'Writing to Flash...')
+								: t(
+										'DisplayConfig:animated-splash-write-btn',
+										'Write Animation to Flash',
+								  )}
+						</Button>
+					</div>
+				</div>
+			)}
+		</Section>
 	);
 };
