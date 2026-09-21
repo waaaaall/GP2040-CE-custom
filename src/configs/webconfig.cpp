@@ -18,6 +18,10 @@
 #include <set>
 
 #include <pico/types.h>
+#include <pico/multicore.h>
+#include <hardware/flash.h>
+#include <hardware/sync.h>
+#include "display/ui/screens/splash_anim.h"
 
 // HTTPD Includes
 #include <ArduinoJson.h>
@@ -537,6 +541,101 @@ std::string setSplashImage()
     Storage::getInstance().save();
 
     return serialize_json(doc);
+}
+
+#define FLASH_SPLASH_OFFSET (FLASH_SPLASH_ADDR - 0x10000000)
+
+std::string getSplashAnimationInfo()
+{
+    DynamicJsonDocument doc(LWIP_HTTPD_POST_MAX_PAYLOAD_LEN);
+
+    if (hasFlashSplashAnim()) {
+        const FlashSplashHeader* header = (const FlashSplashHeader*)FLASH_SPLASH_ADDR;
+        doc["hasAnimation"] = true;
+        doc["frameCount"] = header->frame_count;
+        doc["totalDuration"] = header->total_duration;
+        doc["width"] = header->width;
+        doc["height"] = header->height;
+        doc["frameSize"] = header->frame_size;
+    } else {
+        doc["hasAnimation"] = false;
+    }
+
+    return serialize_json(doc);
+}
+
+std::string uploadSplashAnimChunk()
+{
+    DynamicJsonDocument req = get_post_data();
+    DynamicJsonDocument res(LWIP_HTTPD_POST_MAX_PAYLOAD_LEN);
+
+    uint32_t offset = req["offset"] | 0;
+    uint32_t totalSize = req["totalSize"] | 0;
+    std::string base64Data = req["data"] | "";
+
+    if (totalSize < sizeof(FlashSplashHeader) || totalSize > (512 * 1024)) {
+        res["success"] = false;
+        res["error"] = "Invalid total size";
+        return serialize_json(res);
+    }
+
+    if (offset % FLASH_PAGE_SIZE != 0) {
+        res["success"] = false;
+        res["error"] = "Offset must be 256-byte aligned";
+        return serialize_json(res);
+    }
+
+    std::string decoded;
+    Base64::Decode(base64Data, decoded);
+
+    if (offset + decoded.size() > totalSize) {
+        res["success"] = false;
+        res["error"] = "Chunk exceeds total size";
+        return serialize_json(res);
+    }
+
+    // Erase on first chunk
+    if (offset == 0) {
+        uint32_t eraseSize = ((totalSize + FLASH_SECTOR_SIZE - 1) / FLASH_SECTOR_SIZE) * FLASH_SECTOR_SIZE;
+        multicore_lockout_start_blocking();
+        uint32_t interrupts = save_and_disable_interrupts();
+        flash_range_erase(FLASH_SPLASH_OFFSET, eraseSize);
+        restore_interrupts(interrupts);
+        multicore_lockout_end_blocking();
+    }
+
+    // Program flash in multiples of FLASH_PAGE_SIZE (256 bytes)
+    if (!decoded.empty()) {
+        size_t chunkLen = decoded.size();
+        size_t paddedLen = ((chunkLen + FLASH_PAGE_SIZE - 1) / FLASH_PAGE_SIZE) * FLASH_PAGE_SIZE;
+        std::vector<uint8_t> pageBuf(paddedLen, 0xFF);
+        memcpy(pageBuf.data(), decoded.data(), chunkLen);
+
+        multicore_lockout_start_blocking();
+        uint32_t interrupts = save_and_disable_interrupts();
+        flash_range_program(FLASH_SPLASH_OFFSET + offset, pageBuf.data(), paddedLen);
+        restore_interrupts(interrupts);
+        multicore_lockout_end_blocking();
+    }
+
+    res["success"] = true;
+    res["offset"] = offset;
+    res["bytesWritten"] = decoded.size();
+    return serialize_json(res);
+}
+
+std::string clearSplashAnimation()
+{
+    DynamicJsonDocument res(LWIP_HTTPD_POST_MAX_PAYLOAD_LEN);
+
+    multicore_lockout_start_blocking();
+    uint32_t interrupts = save_and_disable_interrupts();
+    flash_range_erase(FLASH_SPLASH_OFFSET, FLASH_SECTOR_SIZE);
+    restore_interrupts(interrupts);
+    multicore_lockout_end_blocking();
+
+    res["success"] = true;
+    return serialize_json(res);
 }
 
 std::string setProfileOptions()
@@ -2174,6 +2273,8 @@ static const std::pair<const char*, HandlerFuncPtr> handlerFuncs[] =
     { "/api/setPS4Options", setPS4Options },
     { "/api/setWiiControls", setWiiControls },
     { "/api/setSplashImage", setSplashImage },
+    { "/api/uploadSplashAnimChunk", uploadSplashAnimChunk },
+    { "/api/clearSplashAnimation", clearSplashAnimation },
     { "/api/reboot", reboot },
     { "/api/getDisplayOptions", getDisplayOptions },
     { "/api/getGamepadOptions", getGamepadOptions },
@@ -2188,6 +2289,7 @@ static const std::pair<const char*, HandlerFuncPtr> handlerFuncs[] =
     { "/api/getMacroAddonOptions", getMacroAddonOptions },
     { "/api/resetSettings", resetSettings },
     { "/api/getSplashImage", getSplashImage },
+    { "/api/getSplashAnimationInfo", getSplashAnimationInfo },
     { "/api/getFirmwareVersion", getFirmwareVersion },
     { "/api/getMemoryReport", getMemoryReport },
     { "/api/getHeldPins", getHeldPins },

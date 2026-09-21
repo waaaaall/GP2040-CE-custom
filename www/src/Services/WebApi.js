@@ -260,6 +260,37 @@ async function setSplashImage({ splashImage }) {
 		.catch(console.error);
 }
 
+async function getSplashAnimationInfo() {
+	try {
+		const response = await Http.get(`${baseUrl}/api/getSplashAnimationInfo`);
+		return response.data;
+	} catch (error) {
+		console.error(error);
+	}
+}
+
+async function uploadSplashAnimChunk({ offset, totalSize, data }) {
+	return Http.post(`${baseUrl}/api/uploadSplashAnimChunk`, {
+		offset,
+		totalSize,
+		data,
+	})
+		.then((response) => response.data)
+		.catch((err) => {
+			console.error(err);
+			throw err;
+		});
+}
+
+async function clearSplashAnimation() {
+	return Http.post(`${baseUrl}/api/clearSplashAnimation`, {})
+		.then((response) => response.data)
+		.catch((err) => {
+			console.error(err);
+			throw err;
+		});
+}
+
 async function getGamepadOptions(setLoading) {
 	setLoading(true);
 
@@ -704,6 +735,9 @@ const WebApi = {
 	getButtonLayoutDefs,
 	getSplashImage,
 	setSplashImage,
+	getSplashAnimationInfo,
+	uploadSplashAnimChunk,
+	clearSplashAnimation,
 	getFirmwareVersion,
 	getMemoryReport,
 	getUsedPins,

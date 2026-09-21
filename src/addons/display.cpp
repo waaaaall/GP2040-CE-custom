@@ -15,6 +15,7 @@
 #include "version.h"
 #include "config.pb.h"
 #include "class/hid/hid.h"
+#include "splash_anim.h"
 
 bool DisplayAddon::available() {
     const DisplayOptions& options = Storage::getInstance().getDisplayOptions();
@@ -54,7 +55,7 @@ void DisplayAddon::setup() {
 
     // set current display mode
     if (!configMode) {
-        if (Storage::getInstance().getDisplayOptions().splashMode != static_cast<SplashMode>(SPLASH_MODE_NONE)) {
+        if (hasFlashSplashAnim() || Storage::getInstance().getDisplayOptions().splashMode != static_cast<SplashMode>(SPLASH_MODE_NONE)) {
             currDisplayMode = DisplayMode::SPLASH;
         } else {
             currDisplayMode = DisplayMode::BUTTONS;
